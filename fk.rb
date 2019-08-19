@@ -14,20 +14,23 @@
 #
 # https://github.com/walerian777/destroy-all-software/tree/master/compiler
 
-# TODO, variable use checking, main function, and rest of functions, smart tabbing
+# TODO, main function, and rest of functions with param enforcement, smart tabbing, bash error catching output
 
 require 'pp'
 
 script = %q(
-  $NS="benjamins-release"
-  $POD="benjamins-release"
-  bash_into($POD, $NS)
+  def main() {
+    $NS="benjamins-release"
+    $POD="benjamins-release"
+    bash_into($POD, $NS)
+  }
 )
 
 Token = Struct.new(:type, :value)
 
 class Tokenizer
   TOKEN_TYPES = [
+      [:func_def, /\bdef\b/],
       [:var, /\$[A-Z]+/,/[A-Z]+/],
       [:string, /"(.*?)"/, /\b[a-zA-Z-]+\b/],
       [:identifier, /\b[a-zA-Z_]+\b/],
@@ -35,6 +38,8 @@ class Tokenizer
       [:cparen, /\)/],
       [:comma, /,/],
       [:equal, /=/],
+      [:openb, /{/],
+      [:closeb, /}/]
   ].freeze
 
   def initialize(code)
@@ -75,7 +80,7 @@ class Tokenizer
   end
 end
 
-RootNode = Struct.new(:body)
+DefNode = Struct.new(:name, :arg_names, :body)
 CallNode = Struct.new(:name, :args)
 VarSetNode = Struct.new(:name, :value)
 VarGetNode = Struct.new(:name)
@@ -88,20 +93,48 @@ class Parser
   end
 
   def parse
-    root = RootNode.new([])
-    while @tokens.any?
-      if peek(:var) and peek(:equal, 1)
-        root.body << set_var
-      elsif peek(:identifier) and peek(:oparen, 1)
-        root.body << parse_call
-      else
-        raise "Unsure what to do with #{@tokens.first} at root"
-      end
-    end
-    root
+    parse_func_def
   end
 
-  def set_var
+  def parse_func_def
+    consume(:func_def)
+    name = consume(:identifier).value
+    args = parse_func_def_args
+    body = parse_func_def_body
+    DefNode.new(name, args, body)
+  end
+
+  def parse_func_def_args
+    consume(:oparen)
+
+    if peek(:cparen)
+      consume(:cparen)
+      return []
+    end
+
+    args = []
+    args << consume(:identifier).value
+    while peek(:comma)
+      consume(:comma)
+      args << consume(:identifier).value
+    end
+    consume(:cparen)
+
+    args
+  end
+
+  def parse_func_def_body
+    consume(:openb)
+    expressions = []
+
+    until peek(:closeb)
+      expressions << parse_expression
+    end
+
+    expressions
+  end
+
+  def parse_var_set
     name = consume(:var).value
     consume(:equal)
 
@@ -109,52 +142,62 @@ class Parser
       raise "Already have defined variable #{name}"
     end
     @vars << name
-    
+
     value = parse_string
 
     VarSetNode.new(name, value)
   end
-  
+
+  def parse_var_get
+    value = consume(:var).value
+
+    unless @vars.include?(value)
+      raise "A variable named #{value} has not been set"
+    end
+
+    VarGetNode.new(value)
+  end
+
   def parse_string
     StringNode.new(consume(:string).value)
   end
 
   def parse_call
     name = consume(:identifier).value
-    args = parse_arg_exprs
+    args = parse_call_args
     CallNode.new(name, args)
   end
 
-  def parse_arg_exprs
+  def parse_call_args
     consume(:oparen)
 
     if peek(:cparen)
       return []
     end
 
-    arg_exprs = []
-    arg_exprs << parse_argument
+    expressions = []
+    expressions << parse_expression
     while peek(:comma)
       consume(:comma)
-      arg_exprs << parse_argument
+      expressions << parse_expression
     end
     consume(:cparen)
 
-    arg_exprs
+    expressions
   end
 
-  def parse_argument
+  def parse_expression
     if peek(:string)
-      parse_string 
+      parse_string
     elsif peek(:identifier) && peek(:oparen, 1)
       parse_call
-    else
+    elsif peek(:var) && peek(:equal,1)
+      parse_var_set
+    elsif peek(:var)
       parse_var_get
+    else
+      raise "Unknown expression #{@tokens[0]}"
     end
-  end
-
-  def parse_var_get
-    VarGetNode.new(consume(:var).value)
   end
 
   def consume(expected_type)
@@ -169,26 +212,50 @@ class Parser
   end
 end
 
-KNOWN_FUNCTIONS = %w(ask find_namespace find_pod scale_pods_in_namespace_to bash_into tail_log port_forward)
+KNOWN_FUNCTIONS = {
+    ask: {
+        required: 1,
+        optional: 1
+    },
+    find_namespace: {
+        required: 1,
+        optional: 0
+    },
+    find_pod: {
+        required: 1,
+        optional: 0
+    },
+    scale_pods_in_namespace_to: {
+        required: 2,
+        optional: 0
+    },
+    bash_into: {
+        required: 1,
+        optional: 1
+    },
+    tail_log: {
+        required: 1,
+        optional: 1
+    },
+    port_forward: {
+        required: 3,
+        optional: 1
+    }
+}
 
 class Generator
   def initialize(root)
     @root = root
-    @output = []
   end
 
   def generate
-    @root.body.each do |expr|
-      @output << "\t" + gen(expr)
-    end
-
-    @output.unshift("function krun() {")
-    @output.append("}")
-    @output.join("\n")
+    gen(@root)
   end
 
   def gen(node)
     case node
+    when DefNode
+      "function #{node.name}(#{node.arg_names.join(',')}) {\n" + node.body.map{|i| gen(i)}.join("\n") + "\n}"
     when VarSetNode
       "#{node.name}=#{gen(node.value)}"
     when VarGetNode
@@ -198,14 +265,25 @@ class Generator
     when CallNode
       case node.name
       when "bash_into"
+        func_validate("bash_into", node.args.count, 1,1)
         ns = ""
         if node.args[1]
           ns = "-n #{gen(node.args[1])} "
         end
         "kubectl exec #{ns}-it #{gen(node.args[0])} -- /bin/bash"
+      else
+        raise "Unknown function, cant call #{node.name}"
       end
     else
       raise "Unsure what to do with #{node}"
+    end
+  end
+
+  def func_validate(name, args_count, required, optional)
+    if args_count < required
+      raise "Expecting at least #{min} args but got #{args_count} for #{name}"
+    elsif args_count > required + optional
+      raise "Got #{args_count} args for #{name} but the maximum is #{required + optional}"
     end
   end
 end
