@@ -14,12 +14,14 @@
 #
 # https://github.com/walerian777/destroy-all-software/tree/master/compiler
 
+# TODO, variable use checking, main function, and rest of functions, smart tabbing
+
 require 'pp'
 
 script = %q(
-$NS="benjamins-release"
-$POD="benjamins-release"
-bash_into($POD, $NS)
+  $NS="benjamins-release"
+  $POD="benjamins-release"
+  bash_into($POD, $NS)
 )
 
 Token = Struct.new(:type, :value)
@@ -74,7 +76,7 @@ class Tokenizer
 end
 
 RootNode = Struct.new(:body)
-CallNode = Struct.new(:name, :arg_exprs)
+CallNode = Struct.new(:name, :args)
 VarSetNode = Struct.new(:name, :value)
 VarGetNode = Struct.new(:name)
 StringNode = Struct.new(:value)
@@ -118,7 +120,7 @@ class Parser
   end
 
   def parse_call
-    name = consume(:identifier)
+    name = consume(:identifier).value
     args = parse_arg_exprs
     CallNode.new(name, args)
   end
@@ -170,12 +172,41 @@ end
 KNOWN_FUNCTIONS = %w(ask find_namespace find_pod scale_pods_in_namespace_to bash_into tail_log port_forward)
 
 class Generator
-  def initialize(tree)
-    @tree = tree
+  def initialize(root)
+    @root = root
+    @output = []
   end
 
   def generate
+    @root.body.each do |expr|
+      @output << "\t" + gen(expr)
+    end
 
+    @output.unshift("function krun() {")
+    @output.append("}")
+    @output.join("\n")
+  end
+
+  def gen(node)
+    case node
+    when VarSetNode
+      "#{node.name}=#{gen(node.value)}"
+    when VarGetNode
+      "$#{node.name}"
+    when StringNode
+      node.value
+    when CallNode
+      case node.name
+      when "bash_into"
+        ns = ""
+        if node.args[1]
+          ns = "-n #{gen(node.args[1])} "
+        end
+        "kubectl exec #{ns}-it #{gen(node.args[0])} -- /bin/bash"
+      end
+    else
+      raise "Unsure what to do with #{node}"
+    end
   end
 end
 
@@ -184,7 +215,7 @@ pp tokens
 parse_tree = Parser.new(tokens).parse
 pp parse_tree
 func = Generator.new(parse_tree).generate
-pp func
+puts func
 
 
 # function dqar() {
