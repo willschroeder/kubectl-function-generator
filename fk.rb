@@ -1,30 +1,29 @@
 #!/usr/bin/env ruby
 
-# parse_namespace https://syntagmatic-foreign-policy.dqa.life/; scale_pods 1; find_pod_including main-site; bash_into;
-# set_namespace benjamins-release; find_pod_including benjamins-release; tail_log;
+# Based On
+# https://github.com/walerian777/destroy-all-software/tree/master/compiler
 #
 # $VAR="value" # all variables are all caps, start with $, must be strings, and are global
 # print("output this string")
-# $OUT=ask
-# $NS=find_namespace(namespace) # fuzzy
-# $POD=find_pod(pod) # fuzzy
-# scale_pods_in_namespace_to(namespace, count)
-# bash_into(pod, namespace?)
+# $OUT=ask # will ask the user for input, and assign the variable
+# $NS=find_namespace(namespace) # fuzzy match a namespace
+# $POD=find_pod(pod) # fuzzy match a pod
+# scale_pods_in_namespace_to(namespace, count) # changes amount of instances of all pod types
+# bash_into(pod, namespace?) #
 # tail_log(pod, namespace?)
 # port_forward(pod, local, remote, namespace?)
-# $TEST=ask
 #
-# https://github.com/walerian777/destroy-all-software/tree/master/compiler
-
-# TODO
-# bash error catching output,
 
 require 'pp'
 
 script = %q(
   def main() {
-    $NS=find_namespace("benjamins-release")
-    $POD=find_pod("benjamins-release",$NS)
+    print("Enter a namespace")
+    $NS_TO_FIND=ask
+    $NS=find_namespace($NS_TO_FIND)
+    print("Enter a fuzzy pod")
+    $POD_TO_FIND=ask
+    $POD=find_pod($POD_TO_FIND,$NS)
     bash_into($POD,$NS)
   }
 )
@@ -34,7 +33,7 @@ Token = Struct.new(:type, :value)
 class Tokenizer
   TOKEN_TYPES = [
       [:func_def, /\bdef\b/],
-      [:var, /\$[A-Z]+/,/[A-Z]+/],
+      [:var, /\$[A-Z_]+/,/[A-Z_]+/],
       [:ask, /\bask\b/],
       [:string, /"(.*?)"/, /\b[a-zA-Z\- ]+\b/],
       [:identifier, /\b[a-zA-Z_]+\b/],
