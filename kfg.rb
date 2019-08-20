@@ -17,14 +17,15 @@
 require 'pp'
 
 script = %q(
-  def main() {
+  def tail_dqa() {
     print("Enter a namespace")
     $NS_TO_FIND=ask
     $NS=find_namespace($NS_TO_FIND)
     print("Enter a fuzzy pod")
     $POD_TO_FIND=ask
     $POD=find_pod($POD_TO_FIND,$NS)
-    bash_into($POD,$NS)
+    scale_pods_in_namespace_to($NS,"1")
+    tail_log($POD,$NS)
   }
 )
 
@@ -35,7 +36,7 @@ class Tokenizer
       [:func_def, /\bdef\b/],
       [:var, /\$[A-Z_]+/,/[A-Z_]+/],
       [:ask, /\bask\b/],
-      [:string, /"(.*?)"/, /\b[a-zA-Z\- ]+\b/],
+      [:string, /"(.*?)"/, /\b[a-zA-Z0-9\- ]+\b/],
       [:identifier, /\b[a-zA-Z_]+\b/],
       [:oparen, /\(/],
       [:cparen, /\)/],
@@ -276,10 +277,15 @@ class Generator
     when AskNode
       "$(read temp && echo $temp)"
     when VarSetNode
-      if node.value.is_a?(CallNode)
+      case node.value
+      when CallNode
         "#{node.name}=$(#{gen(node.value)})"
-      elsif node.value.is_a?(StringNode)
+      when StringNode
         "#{node.name}=#{gen(node.value)}"
+      when AskNode
+        "#{node.name}=#{gen(node.value)}"
+      else
+        raise "Unsure how to set var with #{node.value}"
       end
     when VarGetNode
       "$#{node.name}"
@@ -347,6 +353,6 @@ end
 tokens = Tokenizer.new(script).tokenize
 # pp tokens
 parse_tree = Parser.new(tokens).parse
-# pp parse_tree
+pp parse_tree
 func = Generator.new(parse_tree).generate
 puts func
