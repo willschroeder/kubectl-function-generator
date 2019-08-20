@@ -4,25 +4,28 @@
 # set_namespace benjamins-release; find_pod_including benjamins-release; tail_log;
 #
 # $VAR="value" # all variables are all caps, start with $, must be strings, and are global
-# $OUT=ask("contextual question", regex?)
+# print("output this string")
+# $OUT=ask
 # $NS=find_namespace(namespace) # fuzzy
 # $POD=find_pod(pod) # fuzzy
 # scale_pods_in_namespace_to(namespace, count)
 # bash_into(pod, namespace?)
 # tail_log(pod, namespace?)
 # port_forward(pod, local, remote, namespace?)
+# $TEST=ask
 #
 # https://github.com/walerian777/destroy-all-software/tree/master/compiler
 
-# TODO, main function, and rest of functions with param enforcement, smart tabbing, bash error catching output
+# TODO
+# bash error catching output,
 
 require 'pp'
 
 script = %q(
   def main() {
-    $NS="benjamins-release"
-    $POD="benjamins-release"
-    bash_into($POD, $NS)
+    $NS=find_namespace("benjamins-release")
+    $POD=find_pod("benjamins-release",$NS)
+    bash_into($POD,$NS)
   }
 )
 
@@ -32,7 +35,8 @@ class Tokenizer
   TOKEN_TYPES = [
       [:func_def, /\bdef\b/],
       [:var, /\$[A-Z]+/,/[A-Z]+/],
-      [:string, /"(.*?)"/, /\b[a-zA-Z-]+\b/],
+      [:ask, /\bask\b/],
+      [:string, /"(.*?)"/, /\b[a-zA-Z\- ]+\b/],
       [:identifier, /\b[a-zA-Z_]+\b/],
       [:oparen, /\(/],
       [:cparen, /\)/],
@@ -85,6 +89,7 @@ CallNode = Struct.new(:name, :args)
 VarSetNode = Struct.new(:name, :value)
 VarGetNode = Struct.new(:name)
 StringNode = Struct.new(:value)
+AskNode = Struct.new(:null)
 
 class Parser
   def initialize(tokens)
@@ -143,7 +148,15 @@ class Parser
     end
     @vars << name
 
-    value = parse_string
+    if peek(:string)
+      value = parse_string
+    elsif peek(:ask)
+      value = parse_ask
+    elsif peek(:identifier) and peek(:oparen,1)
+      value = parse_call
+    else
+      raise "Unknown assignment type #{@tokens[0]}"
+    end
 
     VarSetNode.new(name, value)
   end
@@ -160,6 +173,11 @@ class Parser
 
   def parse_string
     StringNode.new(consume(:string).value)
+  end
+
+  def parse_ask
+    consume(:ask)
+    AskNode.new
   end
 
   def parse_call
@@ -212,10 +230,10 @@ class Parser
   end
 end
 
-KNOWN_FUNCTIONS = {
-    ask: {
+FUNCTION_LIBRARY = {
+    print: {
         required: 1,
-        optional: 1
+        optional: 0
     },
     find_namespace: {
         required: 1,
@@ -223,7 +241,7 @@ KNOWN_FUNCTIONS = {
     },
     find_pod: {
         required: 1,
-        optional: 0
+        optional: 1
     },
     scale_pods_in_namespace_to: {
         required: 2,
@@ -240,7 +258,7 @@ KNOWN_FUNCTIONS = {
     port_forward: {
         required: 3,
         optional: 1
-    }
+    },
 }
 
 class Generator
@@ -256,23 +274,23 @@ class Generator
     case node
     when DefNode
       "function #{node.name}(#{node.arg_names.join(',')}) {\n" + node.body.map{|i| gen(i)}.join("\n") + "\n}"
+    when AskNode
+      "$(read temp && echo $temp)"
     when VarSetNode
-      "#{node.name}=#{gen(node.value)}"
+      if node.value.is_a?(CallNode)
+        "#{node.name}=$(#{gen(node.value)})"
+      elsif node.value.is_a?(StringNode)
+        "#{node.name}=#{gen(node.value)}"
+      end
     when VarGetNode
       "$#{node.name}"
     when StringNode
       node.value
     when CallNode
-      case node.name
-      when "bash_into"
-        func_validate("bash_into", node.args.count, 1,1)
-        ns = ""
-        if node.args[1]
-          ns = "-n #{gen(node.args[1])} "
-        end
-        "kubectl exec #{ns}-it #{gen(node.args[0])} -- /bin/bash"
+      if FUNCTION_LIBRARY.keys.include?(node.name.to_sym)
+        gen_library_call(node)
       else
-        raise "Unknown function, cant call #{node.name}"
+        raise "Unknown function #{node.name}, not in library"
       end
     else
       raise "Unsure what to do with #{node}"
@@ -286,15 +304,53 @@ class Generator
       raise "Got #{args_count} args for #{name} but the maximum is #{required + optional}"
     end
   end
+
+  def gen_library_call(node)
+    name = node.name.to_sym
+    args = node.args
+    info = FUNCTION_LIBRARY[name]
+
+    func_validate(name, args.count, info[:required], info[:optional])
+
+    case name
+    when :print
+      if args[0].is_a?(StringNode)
+        "echo \"#{gen(args[0])}\""
+      elsif args[0].is_a?(VarGetNode)
+        "echo #{gen(args[0])}"
+      end
+    when :find_namespace
+      "kubectl get ns | grep #{gen(args[0])} | grep -o '^[a-z-]\\+'"
+    when :find_pod
+      "kubectl #{ns_string(args[1])} get pods | grep Running | head -n 1 | grep -o '^[a-z0-9-]\\+'"
+    when :scale_pods_in_namespace_to
+      "kubectl scale deploy -n #{gen(args[0])} --replicas=#{gen(args[1])} --all"
+    when :tail_log
+      "kubectl #{ns_string(args[1])} logs #{gen(args[0])} -f"
+    when :bash_into
+      "kubectl exec #{ns_string(args[1])} -it #{gen(args[0])} -- /bin/bash"
+    when :port_forward
+      "kubectl port-forward #{ns_string(args[4])} #{gen(args[0])} #{gen(args[1])}:#{gen(args[2])}"
+    else
+      raise "Library function #{name} not implemented"
+    end
+  end
+
+  def ns_string(arg)
+    ns = ""
+    if arg
+      ns = "-n #{gen(arg)} "
+    end
+    ns
+  end
 end
 
 tokens = Tokenizer.new(script).tokenize
-pp tokens
+# pp tokens
 parse_tree = Parser.new(tokens).parse
-pp parse_tree
+# pp parse_tree
 func = Generator.new(parse_tree).generate
 puts func
-
 
 # function dqar() {
 #   if [ "$1" == "" ]; then
